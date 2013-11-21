@@ -3,6 +3,11 @@
 #include <unistd.h>
 #include <signal.h>
 #include <wordexp.h>
+#include <cstring>
+#include <exception>
+#include <system_error>
+#include <sstream>
+#include <iostream>
 #include <process-control/Process.hpp>
 
 
@@ -15,10 +20,34 @@ struct ProcessPrivate
 
 Process::Process(const std::string & cmd)
 {
+	// evaluate word expression
+	wordexp_t result;
+	switch(wordexp(cmd.c_str(), &result, 0))
+	{
+		case 0:
+			// success
+			break;
+		case WRDE_BADCHAR:
+			throw std::invalid_argument("Illegal  occurrence of newline or one of |, &, ;, <, >, (, ), {, }.");
+		case WRDE_BADVAL:
+			throw std::invalid_argument("An undefined shell variable was referenced, and the WRDE_UNDEF flag told us to consider this an error.");
+		case WRDE_CMDSUB:
+			throw std::invalid_argument("Command  substitution  occurred, and the WRDE_NOCMD flag told us to consider this an error.");
+		case WRDE_NOSPACE:
+			throw std::runtime_error("Out of memory.");
+		case WRDE_SYNTAX:
+			throw std::invalid_argument("Shell syntax error, such as unbalanced parentheses or unmatched quotes.");
+		default:
+			throw std::runtime_error("unknown wordexp error");
+	}
+
+	/// @todo check to see that the first argument path actually exists and is executable (throw exception if not)
+
 	pid_t pid = fork();
 	if (pid == -1)
 	{
-		/// @todo throw some exception indicating fork failure
+		// throw some exception indicating fork failure
+		throw std::system_error(errno, std::system_category(), "fork failed");
 	}
 	else if(pid == 0)
 	{
@@ -26,36 +55,14 @@ Process::Process(const std::string & cmd)
 		// so that killing it kills the entire process group
 	    setpgid(0, 0);
 
-	    wordexp_t result;
-	    switch(wordexp(cmd.c_str(), &result, 0))
-	    {
-	    	case 0:
-	    		// success
-	    		break;
-	    	case WRDE_BADCHAR:
-	    		// Illegal  occurrence of newline or one of |, &, ;, <, >, (, ), {, }.
-	    	case WRDE_BADVAL:
-	    		// An undefined shell variable was referenced, and the WRDE_UNDEF flag
-	    		// told us to consider this an error.
-	    	case WRDE_CMDSUB:
-	        	// Command  substitution  occurred, and the WRDE_NOCMD flag
-	    		// told us to consider this an error.
-	    	case WRDE_NOSPACE:
-	            // Out of memory.
-	    	case WRDE_SYNTAX:
-	    		// Shell syntax error, such as unbalanced parentheses or unmatched	quotes.
-	    	default:
-	    		// throwing an exception here doesn't do anything (process has already forked)
-	    		// abort to terminate the program.  calling wait on this process can see that
-	    		// the process was killed with SIGABRT
-	    		abort();
-	    }
-
 	    // execute with argument array
-	    execv(result.we_wordv[0], result.we_wordv);
-
-	    // should never happen
-	    abort();
+	    if (execv(result.we_wordv[0], result.we_wordv) == -1)
+	    {
+	    	// exec failed but there isn't much we can do
+	    	int error = errno;
+	    	std::cerr << "ABORTING: execution of '" << cmd << "' failed with " << strerror(error) << std::endl;
+	    	abort();
+	    }
 	}
 	else
 	{
@@ -63,6 +70,8 @@ Process::Process(const std::string & cmd)
 		priv_ = std::unique_ptr<ProcessPrivate>(new ProcessPrivate());
 		priv_->pid = pid;
 	}
+
+	wordfree(&result);
 	return;
 }
 
@@ -73,13 +82,12 @@ Process::~Process()
 
 std::uint8_t Process::wait()
 {
-	/// @todo
 	int status;
 
 	// does this have to be in a loop?
 	if (-1 == waitpid(priv_->pid, &status, 0))
 	{
-		/// @todo throw exception with error string
+		throw std::system_error(errno, std::system_category(), "waitpid failed");
 	}
 
 	if (WIFEXITED(status))
@@ -90,13 +98,17 @@ std::uint8_t Process::wait()
 	else if (WIFSIGNALED(status))
 	{
 		// process was killed by a signal
-		/// @todo throw exception with signal used to kill the process
+		bool dumpedCore = WCOREDUMP(status);
+		std::stringstream stream;
+		stream << "process exited abnormally with signal: " << strsignal(WTERMSIG(status)) << "(" << WTERMSIG(status) << ")";
+		if ( WCOREDUMP(status))
+		{
+			stream << " ... dumped core";
+		}
+		throw std::runtime_error(stream.str());
 	}
-	else
-	{
-		// should not occur
-		/// @todo throw exception or assert
-	}
+	throw std::runtime_error ("dumpadoodledoo");
+	// this should never happen
 	abort();
 }
 

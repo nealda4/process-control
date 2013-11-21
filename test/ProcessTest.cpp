@@ -15,11 +15,11 @@ ProcessTest::tearDown()
 void
 ProcessTest::testConstructor()
 {
-	ProcessControl::Process("${PWD}/spawned-process");
-  //CPPUNIT_FAIL( "not implemented" );
+	CPPUNIT_ASSERT_NO_THROW_MESSAGE("constructor threw exception", ProcessControl::Process("/bin/ls"));
 }
 void
 ProcessTest::testWaitExitNormal()
 {
-  CPPUNIT_ASSERT_THROW_MESSAGE("expecting exception", ProcessControl::Process("${PWD}/spawned-process").wait(), std::exception);
+	unsigned retval = static_cast<unsigned>(ProcessControl::Process("/bin/ls").wait());
+	CPPUNIT_ASSERT_EQUAL_MESSAGE("process return value != EXIT_SUCCESS (0)", static_cast<unsigned>(0), retval);
 }
