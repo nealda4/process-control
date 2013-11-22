@@ -1,5 +1,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
 #include <wordexp.h>
@@ -16,13 +17,23 @@ namespace ProcessControl
 struct ProcessPrivate
 {
 	pid_t pid;
+	wordexp_t result;
+	int pipefd[2];
 };
 
 Process::Process(const std::string & cmd)
 {
+
+	priv_ = std::unique_ptr<ProcessPrivate>(new ProcessPrivate());
+
+	// pipe with close on exec
+	if (pipe2(priv_->pipefd, O_CLOEXEC)  == -1)
+	{
+		throw std::system_error(errno, std::system_category(), "pipe2 failed");
+	}
+
 	// evaluate word expression
-	wordexp_t result;
-	switch(wordexp(cmd.c_str(), &result, 0))
+	switch(wordexp(cmd.c_str(), &priv_->result, 0))
 	{
 		case 0:
 			// success
@@ -41,43 +52,109 @@ Process::Process(const std::string & cmd)
 			throw std::runtime_error("unknown wordexp error");
 	}
 
-	/// @todo check to see that the first argument path actually exists and is executable (throw exception if not)
-
-	pid_t pid = fork();
-	if (pid == -1)
+	priv_->pid = fork();
+	if (priv_->pid == -1)
 	{
 		// throw some exception indicating fork failure
 		throw std::system_error(errno, std::system_category(), "fork failed");
 	}
-	else if(pid == 0)
+	else if(priv_->pid == 0)
 	{
+		// ---- child process ----
+
+		// close read end of pipe
+		static_cast<void>(close(priv_->pipefd[0]));
+
 		// set child process group id to the pid of the child
 		// so that killing it kills the entire process group
 	    setpgid(0, 0);
 
-	    // execute with argument array
-	    if (execv(result.we_wordv[0], result.we_wordv) == -1)
+	    // execute with argument array (pipes will close to notify parent that exec succeeded)
+	    if (execv(priv_->result.we_wordv[0], priv_->result.we_wordv) == -1)
 	    {
 	    	// exec failed but there isn't much we can do
 	    	int error = errno;
-	    	std::cerr << "ABORTING: execution of '" << cmd << "' failed with " << strerror(error) << std::endl;
+
+	    	// write errno to pipe to notify
+	    	uint8_t * buf = reinterpret_cast <uint8_t *> (& error);
+	    	for (size_t total = 0 ; total < sizeof(error); )
+	    	{
+	    		ssize_t count = write(priv_->pipefd[1], &buf[total],sizeof(error) - total);
+	    		if (count < 0)
+	    		{
+	    			// if acceptable error, continue
+	    			if (errno == EINTR)
+	    			{
+	    				continue;
+	    			}
+	    		}
+	    		total += count;
+	    	}
+
+	    	// close write end of pipe
+	    	static_cast<void>(close(priv_->pipefd[1]));
 	    	abort();
 	    }
 	}
-	else
+
+	// ---- parent process ----
+
+	// close write end of pipe
+	static_cast<void>(close(priv_->pipefd[1]));
+
+	// read error code or get pipe closed out of pipe to notify process that exec failed
+	int error = 0;
+	uint8_t * buf = reinterpret_cast<uint8_t *> (&error);
+	for (size_t total = 0; total < sizeof(error); )
 	{
-		// allocate private impl data and store the pid
-		priv_ = std::unique_ptr<ProcessPrivate>(new ProcessPrivate());
-		priv_->pid = pid;
+		ssize_t count = read(priv_->pipefd[0], buf, sizeof(error) - total);
+		if (count < 0)
+		{
+			if (errno == EINTR)
+			{
+				// interrupted in the middle of read
+				continue;
+			}
+
+			// close read end of pipe
+			static_cast<void>(close(priv_->pipefd[0]));
+			throw std::system_error(errno, std::system_category(), "read failed with " + std::string(strerror(errno)));
+		}
+		else if (count == 0)
+		{
+			if (total != 0)
+			{
+				// partial read failure
+				// close read end of pipe
+				static_cast<void>(close(priv_->pipefd[0]));
+				throw std::runtime_error("error reading exec error");
+			}
+
+			// pipe has closed and there was no data
+			// which indicates that exec has succeeded
+			// now we can return
+			break;
+		}
+
+		total += count;
 	}
 
-	wordfree(&result);
-	return;
+	// close read end of pipe
+	static_cast<void>(close(priv_->pipefd[0]));
+
+	if (error != 0)
+	{
+		throw std::system_error(error, std::system_category(), "exec failed with " + std::string(strerror(error)));
+	}
 }
 
 Process::~Process()
 {
-	/// @todo
+	/// @todo kill the process
+
+	static_cast<void>(close (priv_->pipefd[0]));
+	static_cast<void>(close (priv_->pipefd[1]));
+	wordfree(&priv_->result);
 }
 
 std::uint8_t Process::wait()
@@ -107,7 +184,7 @@ std::uint8_t Process::wait()
 		}
 		throw std::runtime_error(stream.str());
 	}
-	throw std::runtime_error ("dumpadoodledoo");
+
 	// this should never happen
 	abort();
 }
