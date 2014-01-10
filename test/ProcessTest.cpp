@@ -16,7 +16,7 @@ ProcessTest::tearDown()
 void
 ProcessTest::testConstructor()
 {
-	CPPUNIT_ASSERT_NO_THROW_MESSAGE("constructor threw exception", ProcessControl::Process("./spawned_process"));
+	CPPUNIT_ASSERT_NO_THROW_MESSAGE("constructor threw exception", ProcessControl::Process("./spawned_process 0"));
 }
 void
 ProcessTest::testConstructorExecFailure()

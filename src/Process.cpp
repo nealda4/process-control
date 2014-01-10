@@ -14,8 +14,53 @@
 
 namespace ProcessControl
 {
-struct ProcessPrivate
+class ProcessPrivate
 {
+public:
+
+	ProcessPrivate() = delete;
+
+	ProcessPrivate(const std::string & cmd) : pid(0)
+	{
+		// pipe with close on exec
+		if (pipe2(pipefd, O_CLOEXEC)  == -1)
+		{
+			throw std::system_error(errno, std::system_category(), "pipe2 failed");
+		}
+
+		// evaluate word expression
+		switch(wordexp(cmd.c_str(), &result, 0))
+		{
+			case 0:
+				// success
+				break;
+			case WRDE_BADCHAR:
+				throw std::invalid_argument("Illegal  occurrence of newline or one of |, &, ;, <, >, (, ), {, }.");
+			case WRDE_BADVAL:
+				throw std::invalid_argument("An undefined shell variable was referenced, and the WRDE_UNDEF flag told us to consider this an error.");
+			case WRDE_CMDSUB:
+				throw std::invalid_argument("Command  substitution  occurred, and the WRDE_NOCMD flag told us to consider this an error.");
+			case WRDE_NOSPACE:
+				throw std::runtime_error("Out of memory.");
+			case WRDE_SYNTAX:
+				throw std::invalid_argument("Shell syntax error, such as unbalanced parentheses or unmatched quotes.");
+			default:
+				throw std::runtime_error("unknown wordexp error");
+		}
+	}
+
+	~ProcessPrivate()
+	{
+		// close read end of pipe
+		static_cast<void>(close (pipefd[0]));
+
+		// close write end of pipe
+		static_cast<void>(close (pipefd[1]));
+
+		// free the argument array
+		wordfree(&result);
+	}
+
 	pid_t pid;
 	wordexp_t result;
 	int pipefd[2];
@@ -24,33 +69,7 @@ struct ProcessPrivate
 Process::Process(const std::string & cmd)
 {
 
-	priv_ = std::unique_ptr<ProcessPrivate>(new ProcessPrivate());
-
-	// pipe with close on exec
-	if (pipe2(priv_->pipefd, O_CLOEXEC)  == -1)
-	{
-		throw std::system_error(errno, std::system_category(), "pipe2 failed");
-	}
-
-	// evaluate word expression
-	switch(wordexp(cmd.c_str(), &priv_->result, 0))
-	{
-		case 0:
-			// success
-			break;
-		case WRDE_BADCHAR:
-			throw std::invalid_argument("Illegal  occurrence of newline or one of |, &, ;, <, >, (, ), {, }.");
-		case WRDE_BADVAL:
-			throw std::invalid_argument("An undefined shell variable was referenced, and the WRDE_UNDEF flag told us to consider this an error.");
-		case WRDE_CMDSUB:
-			throw std::invalid_argument("Command  substitution  occurred, and the WRDE_NOCMD flag told us to consider this an error.");
-		case WRDE_NOSPACE:
-			throw std::runtime_error("Out of memory.");
-		case WRDE_SYNTAX:
-			throw std::invalid_argument("Shell syntax error, such as unbalanced parentheses or unmatched quotes.");
-		default:
-			throw std::runtime_error("unknown wordexp error");
-	}
+	priv_ = std::unique_ptr<ProcessPrivate>(new ProcessPrivate(cmd));
 
 	priv_->pid = fork();
 	if (priv_->pid == -1)
@@ -150,11 +169,41 @@ Process::Process(const std::string & cmd)
 
 Process::~Process()
 {
-	/// @todo kill the process
+	// send nice kill signal to allow process to clean itself up
+	int status = kill(priv_->pid, SIGTERM);
+	if (status == -1)
+	{
+		// try again with SIGKILL and then quit
+		static_cast<void>(kill(priv_->pid, SIGKILL));
+		return;
+	}
 
-	static_cast<void>(close (priv_->pipefd[0]));
-	static_cast<void>(close (priv_->pipefd[1]));
-	wordfree(&priv_->result);
+	// wait on the process (allow it to return immediately)
+	status = waitpid(priv_->pid, nullptr, WNOHANG);
+	if (status == 0)
+	{
+		// process with pid has exited
+		return;
+	}
+	else
+	{
+		// do nothing since this is a destructor
+		// (optimized out)
+	}
+
+	// spin for 1 second
+	struct timespec req;
+	req.tv_sec = 1;
+	req.tv_nsec = 0;
+	while(nanosleep(&req,&req) == -1)
+	{
+		// will this be optimized out?
+		continue;
+	}
+
+	// kill the process with fire
+	static_cast<void>(kill(priv_->pid, SIGKILL));
+
 }
 
 std::uint8_t Process::wait()
@@ -186,7 +235,7 @@ std::uint8_t Process::wait()
 	}
 
 	// this should never happen
-	abort();
+	throw std::logic_error("failed getting wait status");
 }
 
 } // namespace Process
