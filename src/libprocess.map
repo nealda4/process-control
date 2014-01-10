@@ -1,0 +1,13 @@
+ LIBPROCESS_1.0 {
+   global:
+    extern "C++" {
+     *ProcessControl::Process;
+     "ProcessControl::Process::Process(std::string const&)";
+     "ProcessControl::Process::wait()";
+     "ProcessControl::Process::~Process()";
+    };
+ 
+   local:
+     *;
+ };
+ 
